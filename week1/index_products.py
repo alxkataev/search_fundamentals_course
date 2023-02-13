@@ -11,6 +11,7 @@ import logging
 
 from time import perf_counter
 import concurrent.futures
+from opensearch import get_opensearch, create_index
 
 # Test hello commit
 
@@ -80,45 +81,63 @@ mappings =  [
 
         ]
 
-def get_opensearch():
-    host = 'localhost'
-    port = 9200
-    auth = ('admin', 'admin')
-    #### Step 2.a: Create a connection to OpenSearch
-    client = None
-    return client
-
 
 def index_file(file, index_name):
     docs_indexed = 0
-    client = get_opensearch()
+    
     logger.info(f'Processing file : {file}')
     tree = etree.parse(file)
     root = tree.getroot()
     children = root.findall("./product")
     docs = []
+    client = get_opensearch()
+
     for child in children:
         doc = {}
+        
         for idx in range(0, len(mappings), 2):
             xpath_expr = mappings[idx]
             key = mappings[idx + 1]
-            doc[key] = child.xpath(xpath_expr)
-        #print(doc)
+            value = child.xpath(xpath_expr)
+            if type(value) is list:
+                if key in {"accessories", "frequentlyPurchasedWith", "categoryPath", "relatedProducts", "features", "categoryPathIds"}:
+                    doc[key] = value
+                else:
+                    doc[key] = value[0] if value else None
+            else:
+                doc[key] = value
+
         if 'productId' not in doc or len(doc['productId']) == 0:
             continue
+        
         #### Step 2.b: Create a valid OpenSearch Doc and bulk index 2000 docs at a time
-        the_doc = None
-        docs.append(the_doc)
-
+        doc["_index"] = index_name
+        docs.append(doc)
+        
+        if len(docs) == 2000:
+            bulk(client, docs)
+            docs_indexed += len(docs)
+            docs.clear()
+    
+    if docs:
+        bulk(client, docs)
+        docs_indexed += len(docs)
+    
     return docs_indexed
+
+import json
+
 
 @click.command()
 @click.option('--source_dir', '-s', help='XML files source directory')
 @click.option('--index_name', '-i', default="bbuy_products", help="The name of the index to write to")
 @click.option('--workers', '-w', default=8, help="The number of workers to use to process files")
 def main(source_dir: str, index_name: str, workers: int):
-
+    with open("../opensearch/bbuy_products.json") as f:
+        create_index(index_name, json.load(f))
+    
     files = glob.glob(source_dir + "/*.xml")
+    logger.info(f"indexing {len(files)} files")
     docs_indexed = 0
     start = perf_counter()
     with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
